@@ -17,10 +17,8 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap');
-
 html, body, [class*="css"] { font-family: 'Syne', sans-serif; background-color: #0a0a0f; color: #e2e8f0; }
 .stApp { background-color: #0a0a0f; }
-
 .hero-title {
     font-family: 'Syne', sans-serif; font-size: 2.8rem; font-weight: 800;
     background: linear-gradient(90deg, #00ff9d, #00b4ff);
@@ -33,7 +31,7 @@ html, body, [class*="css"] { font-family: 'Syne', sans-serif; background-color: 
 }
 .metric-card {
     background: #111827; border: 1px solid #1f2937; border-radius: 12px;
-    padding: 1.2rem 1.5rem; text-align: center;
+    padding: 1.2rem 1.5rem; text-align: center; margin-bottom: 0.5rem;
 }
 .metric-value { font-family: 'Space Mono', monospace; font-size: 2rem; font-weight: 700; color: #00ff9d; }
 .metric-label { font-size: 0.68rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.1em; margin-top: 0.3rem; }
@@ -42,36 +40,42 @@ html, body, [class*="css"] { font-family: 'Syne', sans-serif; background-color: 
     text-transform: uppercase; letter-spacing: 0.2em; margin-bottom: 0.8rem;
     padding-bottom: 0.4rem; border-bottom: 1px solid #1f2937;
 }
-.info-box {
-    background: rgba(0,180,255,0.07); border: 1px solid rgba(0,180,255,0.25);
+.explain-box {
+    background: rgba(0,255,157,0.05); border: 1px solid rgba(0,255,157,0.2);
     border-radius: 8px; padding: 0.75rem 1rem;
-    font-family: 'Space Mono', monospace; font-size: 0.72rem; color: #7dd3fc;
-    margin-bottom: 1rem;
+    font-family: 'Space Mono', monospace; font-size: 0.7rem; color: #6ee7b7;
+    margin-bottom: 1rem; line-height: 1.8;
 }
 [data-testid="stSidebar"] { background-color: #0d1117; border-right: 1px solid #1f2937; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── API constants ────────────────────────────────────────────────────────────
+# ─── Constants ────────────────────────────────────────────────────────────────
 GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API  = "https://data-api.polymarket.com"
+HEADERS   = {"User-Agent": "PolyTracker/1.0", "Accept": "application/json"}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; PolyTracker/1.0)",
-    "Accept": "application/json",
-}
+CRYPTO_KEYWORDS = [
+    "bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol",
+    "xrp", "ripple", "bnb", "dogecoin", "doge", "altcoin",
+    "will btc", "will bitcoin", "will eth", "price above", "price below",
+    "higher than", "lower than", "reach $", "exceed $", "above $",
+]
 
 # ─── API helpers ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def get_crypto_markets(limit: int = 30) -> list:
-    """Fetch active BTC/Crypto markets via Gamma API."""
+def get_crypto_markets(limit: int = 20) -> list:
+    """
+    Fetch ONLY genuine BTC/Crypto price markets.
+    Filters by tag AND by keyword to avoid pollution with non-crypto markets.
+    """
     markets = []
-    slugs_to_try = ["bitcoin", "btc", "crypto", "ethereum"]
-    for tag in slugs_to_try:
+    # 1. Tag-based fetch
+    for tag in ["bitcoin", "btc", "crypto", "ethereum", "cryptocurrency"]:
         try:
             r = requests.get(
                 f"{GAMMA_API}/markets",
-                params={"limit": limit, "active": "true", "closed": "false", "tag_slug": tag},
+                params={"limit": 30, "active": "true", "closed": "false", "tag_slug": tag},
                 headers=HEADERS, timeout=15,
             )
             if r.ok:
@@ -81,38 +85,24 @@ def get_crypto_markets(limit: int = 30) -> list:
         except Exception:
             pass
 
-    # Also try general search and keyword filter
-    try:
-        r = requests.get(
-            f"{GAMMA_API}/markets",
-            params={"limit": 50, "active": "true", "closed": "false"},
-            headers=HEADERS, timeout=15,
-        )
-        if r.ok:
-            data = r.json()
-            items = data if isinstance(data, list) else data.get("markets", [])
-            for m in items:
-                q = (m.get("question") or m.get("title") or "").lower()
-                if any(k in q for k in ["bitcoin", "btc", "crypto", "ethereum", "eth"]):
-                    markets.append(m)
-    except Exception:
-        pass
-
+    # 2. Deduplicate
     seen, unique = set(), []
     for m in markets:
         cid = m.get("conditionId") or m.get("condition_id") or m.get("id")
-        if cid and cid not in seen:
+        if not cid or cid in seen:
+            continue
+        # Strict keyword filter on title/question
+        title = (m.get("question") or m.get("title") or "").lower()
+        if any(kw in title for kw in CRYPTO_KEYWORDS):
             seen.add(cid)
             unique.append(m)
-    return unique
+
+    return unique[:limit]
 
 
 @st.cache_data(ttl=60)
 def get_trades_for_market(condition_id: str, limit: int = 500) -> list:
-    """
-    Fetch trades using Data API — correct endpoint for per-market trades.
-    GET data-api.polymarket.com/trades?market=<conditionId>&limit=<n>
-    """
+    """GET data-api.polymarket.com/trades?market=<conditionId>"""
     try:
         r = requests.get(
             f"{DATA_API}/trades",
@@ -121,10 +111,7 @@ def get_trades_for_market(condition_id: str, limit: int = 500) -> list:
         )
         if r.ok:
             data = r.json()
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return data.get("data", []) or data.get("trades", [])
+            return data if isinstance(data, list) else data.get("data", [])
     except Exception:
         pass
     return []
@@ -132,10 +119,7 @@ def get_trades_for_market(condition_id: str, limit: int = 500) -> list:
 
 @st.cache_data(ttl=180)
 def get_leaderboard(window: str = "7d", limit: int = 100) -> list:
-    """
-    Fetch top traders from Data API leaderboard.
-    GET data-api.polymarket.com/leaderboard?window=7d&limit=100
-    """
+    """GET data-api.polymarket.com/leaderboard"""
     try:
         r = requests.get(
             f"{DATA_API}/leaderboard",
@@ -144,29 +128,35 @@ def get_leaderboard(window: str = "7d", limit: int = 100) -> list:
         )
         if r.ok:
             data = r.json()
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return data.get("data", []) or data.get("leaderboard", [])
+            return data if isinstance(data, list) else data.get("data", [])
     except Exception:
         pass
     return []
 
 
-def classify_wallet(row) -> str:
-    wr  = row.get("win_rate", 0)
-    cnt = row.get("trade_count", 0)
-    vol = row.get("volume", row.get("total_volume", 0))
-    pnl = row.get("profit", row.get("pnl_est", 0))
-    if cnt >= 20 and wr >= 0.65:
-        return "🤖 BOT"
-    if vol >= 5000 or pnl >= 1000:
-        return "🐳 WHALE"
-    return "👤 HUMAN"
+# ─── Analysis logic ───────────────────────────────────────────────────────────
+def analyze_trades(trades: list, market_title: str = "") -> pd.DataFrame:
+    """
+    Correct bot detection logic:
 
+    Win rate is calculated using PRICE as a proxy for edge:
+    - Buying YES at price < 0.5 means you think YES is undervalued → smart buy
+    - Buying YES at price > 0.5 → chasing (less smart)
+    - We track: did the wallet consistently buy at favorable prices?
 
-def analyze_trades(trades: list) -> pd.DataFrame:
-    """Aggregate trades by proxyWallet → wallet stats."""
+    Additionally we track:
+    - Trade frequency (high = bot signal)
+    - Trade size consistency (similar sizes = bot signal)
+    - Avg price position (consistently below 0.5 = informed/smart)
+
+    Bot criteria (ALL must be true):
+      1. >= min_trades trades
+      2. Avg buy price < 0.48 OR avg sell price > 0.52 (edge in pricing)
+      3. Size consistency (std/mean < 0.5) — bots use fixed sizes
+
+    Whale criteria:
+      - Total volume > $5,000
+    """
     if not trades:
         return pd.DataFrame()
 
@@ -176,93 +166,140 @@ def analyze_trades(trades: list) -> pd.DataFrame:
         side    = str(t.get("side", "")).upper()
         size    = float(t.get("size", 0) or 0)
         price   = float(t.get("price", 0) or 0)
-        outcome = str(t.get("outcome", "")).upper()
+        usd_val = float(t.get("usdcSize", 0) or size * price)
+        ts      = t.get("timestamp", 0) or 0
         rows.append({"wallet": wallet, "side": side, "size": size,
-                     "price": price, "value": size * price, "outcome": outcome})
-
-    df = pd.DataFrame(rows)
-    if df.empty or "wallet" not in df.columns:
-        return pd.DataFrame()
-
-    df = df[df["wallet"].notna() & (df["wallet"] != "")]
-
-    agg = (
-        df.groupby("wallet")
-        .agg(
-            trade_count  = ("size", "count"),
-            total_volume = ("value", "sum"),
-            avg_size     = ("size", "mean"),
-            avg_price    = ("price", "mean"),
-            yes_count    = ("outcome", lambda x: (x == "YES").sum()),
-            no_count     = ("outcome", lambda x: (x == "NO").sum()),
-        )
-        .reset_index()
-    )
-    agg["win_rate"] = agg["yes_count"] / (agg["yes_count"] + agg["no_count"] + 1e-9)
-    agg["pnl_est"]  = agg["total_volume"] * (agg["win_rate"] - 0.5) * 2
-    agg["type"]     = agg.apply(classify_wallet, axis=1)
-
-    return agg.sort_values("win_rate", ascending=False).reset_index(drop=True)
-
-
-def parse_leaderboard(raw: list) -> pd.DataFrame:
-    """Parse leaderboard response into a clean DataFrame."""
-    if not raw:
-        return pd.DataFrame()
-
-    rows = []
-    for entry in raw:
-        wallet  = entry.get("proxyWallet") or entry.get("user") or entry.get("address", "")
-        name    = entry.get("name") or entry.get("pseudonym") or (wallet[:10] + "…" if wallet else "—")
-        profit  = float(entry.get("profit") or entry.get("pnl") or 0)
-        volume  = float(entry.get("volume") or entry.get("totalVolume") or 0)
-        markets = int(entry.get("marketsTraded") or entry.get("markets") or 0)
-        rows.append({"wallet": wallet, "name": name, "profit": profit,
-                     "volume": volume, "markets": markets})
+                     "price": price, "usd_val": usd_val, "ts": int(ts)})
 
     df = pd.DataFrame(rows)
     if df.empty:
+        return pd.DataFrame()
+
+    df = df[df["wallet"].notna() & (df["wallet"] != "") & (df["size"] > 0)]
+    if df.empty:
+        return pd.DataFrame()
+
+    # Per-wallet aggregation
+    results = []
+    for wallet, g in df.groupby("wallet"):
+        trade_count = len(g)
+        total_usd   = g["usd_val"].sum()
+        avg_size    = g["size"].mean()
+        std_size    = g["size"].std(ddof=0) if trade_count > 1 else 0
+        size_cv     = std_size / (avg_size + 1e-9)  # coefficient of variation
+
+        buys  = g[g["side"] == "BUY"]
+        sells = g[g["side"] == "SELL"]
+        avg_buy_price  = buys["price"].mean()  if len(buys)  > 0 else None
+        avg_sell_price = sells["price"].mean() if len(sells) > 0 else None
+
+        # Time pattern: trades per hour
+        if trade_count > 1 and g["ts"].max() > g["ts"].min():
+            time_span_h = (g["ts"].max() - g["ts"].min()) / 3600
+            trades_per_hour = trade_count / (time_span_h + 1e-9)
+        else:
+            trades_per_hour = 0
+
+        # Smart price proxy:
+        # Buying YES cheap (< 0.5) is smart. Selling YES expensive (> 0.5) is smart.
+        smart_buys  = len(buys[buys["price"] < 0.5])   if len(buys)  > 0 else 0
+        smart_sells = len(sells[sells["price"] > 0.5]) if len(sells) > 0 else 0
+        total_directional = len(buys) + len(sells)
+        smart_rate = (smart_buys + smart_sells) / (total_directional + 1e-9)
+
+        # Bot classification
+        is_bot = (
+            trade_count >= 10 and
+            size_cv < 0.6 and           # consistent sizes
+            (trades_per_hour > 0.5 or trade_count >= 25)  # high frequency OR high volume
+        )
+        # Whale
+        is_whale = total_usd >= 5000
+
+        if is_bot:
+            wtype = "🤖 BOT"
+        elif is_whale:
+            wtype = "🐳 WHALE"
+        else:
+            wtype = "👤 HUMAN"
+
+        results.append({
+            "wallet":          wallet,
+            "trade_count":     trade_count,
+            "total_volume":    round(total_usd, 2),
+            "avg_size":        round(avg_size, 4),
+            "size_cv":         round(size_cv, 3),
+            "avg_buy_price":   round(avg_buy_price, 4) if avg_buy_price else None,
+            "avg_sell_price":  round(avg_sell_price, 4) if avg_sell_price else None,
+            "smart_rate":      round(smart_rate, 3),
+            "trades_per_hour": round(trades_per_hour, 2),
+            "buy_count":       len(buys),
+            "sell_count":      len(sells),
+            "type":            wtype,
+            "market":          market_title,
+        })
+
+    return pd.DataFrame(results).sort_values("trade_count", ascending=False).reset_index(drop=True)
+
+
+def parse_leaderboard(raw: list) -> pd.DataFrame:
+    if not raw:
+        return pd.DataFrame()
+    rows = []
+    for entry in raw:
+        wallet  = entry.get("proxyWallet") or entry.get("user") or ""
+        name    = entry.get("name") or entry.get("pseudonym") or (wallet[:10] + "…" if wallet else "—")
+        profit  = float(entry.get("profit") or 0)
+        volume  = float(entry.get("volume") or 0)
+        markets = int(entry.get("marketsTraded") or 0)
+        rows.append({"wallet": wallet, "name": name, "profit": profit,
+                     "volume": volume, "markets": markets})
+    df = pd.DataFrame(rows)
+    if df.empty:
         return df
-
-    df["win_rate"]    = (df["profit"] / (df["volume"] + 1e-9)).clip(0, 1)
-    df["trade_count"] = df["markets"]
-    df["type"]        = df.apply(classify_wallet, axis=1)
-
+    # Smart rate proxy from profit/volume ratio
+    df["profit_rate"] = (df["profit"] / (df["volume"] + 1e-9)).clip(-1, 1)
+    # Bot: high profit_rate + many markets
+    df["type"] = df.apply(lambda r: (
+        "🤖 BOT"   if r["markets"] >= 15 and r["profit_rate"] > 0.15 else
+        "🐳 WHALE" if r["volume"] >= 10000 or r["profit"] >= 2000  else
+        "👤 HUMAN"
+    ), axis=1)
     return df.sort_values("profit", ascending=False).reset_index(drop=True)
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### ⚙️ Configuración")
-
     mode = st.radio(
         "Fuente de datos",
         ["📊 Leaderboard global", "🔍 Trades por mercado"],
         index=0,
-        help="Leaderboard: ranking oficial de Polymarket. Trades: analiza wallets en mercados BTC específicos.",
     )
-
     if mode == "📊 Leaderboard global":
         lb_window = st.selectbox("Ventana de tiempo", ["1d", "7d", "30d", "all"], index=1)
-        lb_limit  = st.slider("Top traders a cargar", 20, 100, 50)
+        lb_limit  = st.slider("Top traders a cargar", 20, 100, 100)
     else:
-        max_markets  = st.slider("Mercados BTC a escanear", 1, 10, 3)
-        trades_limit = st.slider("Trades por mercado", 100, 500, 300)
+        max_markets  = st.slider("Mercados BTC a escanear", 1, 15, 5)
+        trades_limit = st.slider("Trades por mercado", 100, 500, 400)
 
     st.divider()
-    min_trades   = st.slider("Filtro: mínimo trades/mercados", 1, 50, 1)
-    min_win_rate = st.slider("Filtro: win rate mínimo %", 0, 100, 0) / 100
-    show_types   = st.multiselect(
+    min_trades = st.slider("Filtro: mínimo trades", 1, 50, 3)
+    show_types = st.multiselect(
         "Mostrar tipo",
         ["🤖 BOT", "🐳 WHALE", "👤 HUMAN"],
         default=["🤖 BOT", "🐳 WHALE", "👤 HUMAN"],
     )
     st.divider()
     st.markdown("""
-    <div style='font-family:Space Mono,monospace;font-size:0.62rem;color:#4b5563;line-height:2'>
-    🤖 BOT → win rate ≥65% + ≥20 trades<br>
-    🐳 WHALE → profit ≥$1K o vol ≥$5K<br>
-    👤 HUMAN → resto
+    <div style='font-family:Space Mono,monospace;font-size:0.62rem;color:#4b5563;line-height:2.2'>
+    <b style='color:#00ff9d'>🤖 BOT</b><br>
+    ≥10 trades + tamaños consistentes<br>
+    + alta frecuencia o ≥25 trades<br><br>
+    <b style='color:#00b4ff'>🐳 WHALE</b><br>
+    Volumen ≥ $5,000<br><br>
+    <b style='color:#6b7280'>👤 HUMAN</b><br>
+    Resto
     </div>
     """, unsafe_allow_html=True)
 
@@ -277,150 +314,136 @@ st.markdown('<div class="hero-sub">// bot & whale detector · polymarket btc/cry
 # ═══════════════════════════════════════════════════════════════════════════════
 if mode == "📊 Leaderboard global":
 
-    with st.spinner(f"Cargando top {lb_limit} traders ({lb_window}) desde Polymarket Data API..."):
+    with st.spinner(f"Cargando leaderboard ({lb_window}, top {lb_limit})..."):
         raw_lb = get_leaderboard(window=lb_window, limit=lb_limit)
 
     if not raw_lb:
-        st.error("⚠️ No se pudo obtener el leaderboard. La API puede estar temporalmente no disponible. Intenta en unos minutos.")
+        st.error("⚠️ No se pudo obtener el leaderboard. Intenta en unos minutos.")
         st.stop()
 
     df_lb = parse_leaderboard(raw_lb)
-
-    df_f = df_lb[
-        (df_lb["trade_count"] >= min_trades) &
-        (df_lb["win_rate"]    >= min_win_rate) &
+    df_f  = df_lb[
+        (df_lb["markets"] >= min_trades) &
         (df_lb["type"].isin(show_types))
     ].copy()
 
-    # Metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{len(df_lb)}</div><div class="metric-label">Traders en leaderboard</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{len(df_lb)}</div><div class="metric-label">Traders cargados</div></div>', unsafe_allow_html=True)
     with col2:
-        bots = (df_f["type"] == "🤖 BOT").sum()
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{bots}</div><div class="metric-label">Bots detectados</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{(df_f["type"]=="🤖 BOT").sum()}</div><div class="metric-label">Bots detectados</div></div>', unsafe_allow_html=True)
     with col3:
-        whales = (df_f["type"] == "🐳 WHALE").sum()
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{whales}</div><div class="metric-label">Whales detectadas</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{(df_f["type"]=="🐳 WHALE").sum()}</div><div class="metric-label">Whales</div></div>', unsafe_allow_html=True)
     with col4:
-        total_profit = df_f["profit"].sum() if not df_f.empty else 0
-        st.markdown(f'<div class="metric-card"><div class="metric-value">${total_profit:,.0f}</div><div class="metric-label">Profit total filtrado</div></div>', unsafe_allow_html=True)
+        tp = df_f["profit"].sum() if not df_f.empty else 0
+        st.markdown(f'<div class="metric-card"><div class="metric-value">${tp:,.0f}</div><div class="metric-label">Profit total</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["🏆 Ranking de traders", "📈 Visualizaciones"])
+
+    st.markdown('<div class="explain-box">'
+        '📌 <b>Cómo detectamos bots en el leaderboard:</b><br>'
+        '🤖 BOT = opera en ≥15 mercados distintos Y tiene profit_rate > 15% (señal de algoritmo sistemático)<br>'
+        '🐳 WHALE = volumen ≥ $10K o profit ≥ $2K | 👤 HUMAN = resto'
+        '</div>', unsafe_allow_html=True)
+
+    tab1, tab2 = st.tabs(["🏆 Ranking", "📈 Visualizaciones"])
 
     with tab1:
-        st.markdown('<div class="section-title">Top traders por profit — leaderboard global</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Top traders — Polymarket leaderboard global</div>', unsafe_allow_html=True)
         if df_f.empty:
-            st.info("Sin datos con los filtros actuales. Baja los umbrales en el sidebar.")
+            st.info("Sin datos con los filtros actuales.")
         else:
-            display = df_f[["name", "type", "profit", "volume", "markets", "win_rate"]].copy()
-            display.columns = ["Trader", "Tipo", "Profit ($)", "Volumen ($)", "Mercados", "Win Rate Est."]
-            display["Win Rate Est."] = (display["Win Rate Est."] * 100).round(1).astype(str) + "%"
-            display["Profit ($)"]    = display["Profit ($)"].round(2)
-            display["Volumen ($)"]   = display["Volumen ($)"].round(2)
-
-            st.dataframe(
-                display, use_container_width=True, hide_index=True,
+            disp = df_f[["name","type","profit","volume","markets","profit_rate"]].copy()
+            disp.columns = ["Trader","Tipo","Profit ($)","Volumen ($)","Mercados","Profit Rate"]
+            disp["Profit Rate"] = (disp["Profit Rate"]*100).round(1).astype(str) + "%"
+            disp["Profit ($)"]  = disp["Profit ($)"].round(2)
+            disp["Volumen ($)"] = disp["Volumen ($)"].round(2)
+            st.dataframe(disp, use_container_width=True, hide_index=True,
                 column_config={
                     "Profit ($)":  st.column_config.NumberColumn(format="$%.2f"),
                     "Volumen ($)": st.column_config.NumberColumn(format="$%.2f"),
-                },
-            )
-            st.download_button("⬇️ Descargar CSV", display.to_csv(index=False).encode(),
-                               "polytracker_leaderboard.csv", "text/csv")
+                })
+            st.download_button("⬇️ CSV", disp.to_csv(index=False).encode(), "leaderboard.csv", "text/csv")
 
     with tab2:
         if not df_f.empty:
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown('<div class="section-title">Distribución de profit por tipo</div>', unsafe_allow_html=True)
-                fig = px.box(
-                    df_f, x="type", y="profit", color="type",
-                    color_discrete_map={"🤖 BOT": "#00ff9d", "🐳 WHALE": "#00b4ff", "👤 HUMAN": "#6b7280"},
-                    template="plotly_dark", labels={"profit": "Profit $", "type": "Tipo"},
-                )
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.box(df_f, x="type", y="profit", color="type",
+                    color_discrete_map={"🤖 BOT":"#00ff9d","🐳 WHALE":"#00b4ff","👤 HUMAN":"#6b7280"},
+                    template="plotly_dark", labels={"profit":"Profit $","type":"Tipo"})
                 fig.update_layout(paper_bgcolor="#111827", plot_bgcolor="#111827",
-                    showlegend=False, margin=dict(t=20, b=20), font_family="Space Mono")
+                    showlegend=False, margin=dict(t=20,b=20), font_family="Space Mono")
                 st.plotly_chart(fig, use_container_width=True)
-
-            with col_b:
-                st.markdown('<div class="section-title">Volumen vs Profit</div>', unsafe_allow_html=True)
-                fig2 = px.scatter(
-                    df_f, x="volume", y="profit", color="type",
-                    color_discrete_map={"🤖 BOT": "#00ff9d", "🐳 WHALE": "#00b4ff", "👤 HUMAN": "#6b7280"},
-                    template="plotly_dark", hover_data=["name", "markets"],
-                    labels={"volume": "Volumen $", "profit": "Profit $"},
-                )
+            with c2:
+                fig2 = px.scatter(df_f, x="volume", y="profit", color="type", size="markets",
+                    color_discrete_map={"🤖 BOT":"#00ff9d","🐳 WHALE":"#00b4ff","👤 HUMAN":"#6b7280"},
+                    template="plotly_dark", hover_data=["name","markets"],
+                    labels={"volume":"Volumen $","profit":"Profit $"})
                 fig2.update_layout(paper_bgcolor="#111827", plot_bgcolor="#111827",
-                    margin=dict(t=20, b=20), font_family="Space Mono")
+                    margin=dict(t=20,b=20), font_family="Space Mono")
                 st.plotly_chart(fig2, use_container_width=True)
 
-            st.markdown('<div class="section-title">Top 20 traders por profit</div>', unsafe_allow_html=True)
             top20  = df_f.nlargest(20, "profit").copy()
             colors = ["#00ff9d" if v >= 0 else "#ef4444" for v in top20["profit"]]
-            fig3 = go.Figure(go.Bar(
-                x=top20["name"], y=top20["profit"],
-                marker_color=colors,
-                text=["$" + f"{v:,.0f}" for v in top20["profit"]],
-                textposition="outside",
-            ))
-            fig3.update_layout(
-                paper_bgcolor="#111827", plot_bgcolor="#111827",
+            fig3 = go.Figure(go.Bar(x=top20["name"], y=top20["profit"], marker_color=colors,
+                text=["$"+f"{v:,.0f}" for v in top20["profit"]], textposition="outside"))
+            fig3.update_layout(paper_bgcolor="#111827", plot_bgcolor="#111827",
                 font_family="Space Mono", font_color="#9ca3af",
-                margin=dict(t=10, b=10), xaxis_tickangle=-35, yaxis_title="Profit ($)",
-            )
+                margin=dict(t=10,b=10), xaxis_tickangle=-35, yaxis_title="Profit ($)")
             st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("Sin datos para visualizar con los filtros actuales.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODO 2 — TRADES POR MERCADO
 # ═══════════════════════════════════════════════════════════════════════════════
 else:
-    with st.spinner("Obteniendo mercados BTC/Crypto..."):
-        markets = get_crypto_markets(limit=50)
+    with st.spinner("Buscando mercados BTC/Crypto activos..."):
+        markets = get_crypto_markets(limit=30)
 
     if not markets:
-        st.error("No se encontraron mercados BTC/Crypto activos.")
+        st.error("No se encontraron mercados crypto activos con las palabras clave definidas.")
         st.stop()
+
+    # Show what markets were found
+    with st.expander(f"📋 {len(markets)} mercados crypto encontrados — click para ver"):
+        for m in markets:
+            st.markdown(f"• {m.get('question') or m.get('title','?')}")
 
     selected    = markets[:max_markets]
     all_wallets = []
     market_log  = []
 
-    prog = st.progress(0, text="Escaneando mercados...")
+    prog = st.progress(0, text="Iniciando escaneo...")
     for i, mkt in enumerate(selected):
         cid   = mkt.get("conditionId") or mkt.get("condition_id") or mkt.get("id") or ""
         title = mkt.get("question") or mkt.get("title") or cid[:20]
-        prog.progress((i + 1) / len(selected), text=f"Escaneando: {title[:55]}...")
+        prog.progress((i+1)/len(selected), text=f"[{i+1}/{len(selected)}] {title[:50]}…")
 
         trades = get_trades_for_market(cid, limit=trades_limit)
-        df_w   = analyze_trades(trades)
+        df_w   = analyze_trades(trades, market_title=title)
         if not df_w.empty:
-            df_w["market"] = title
             all_wallets.append(df_w)
-        market_log.append({"Mercado": title[:60], "Condition ID": cid[:20] + "…", "Trades": len(trades)})
-        time.sleep(0.3)
+        market_log.append({"Mercado": title[:65], "Trades obtenidos": len(trades),
+                           "Wallets únicas": len(df_w) if not df_w.empty else 0})
+        time.sleep(0.25)
 
     prog.empty()
 
     if not all_wallets:
-        st.warning("No se obtuvieron trades en los mercados. Prueba el modo **📊 Leaderboard global** que usa un endpoint diferente.")
+        st.warning("No se obtuvieron trades. La Data API puede estar limitando peticiones. Prueba el modo **📊 Leaderboard global**.")
         st.dataframe(pd.DataFrame(market_log), use_container_width=True, hide_index=True)
         st.stop()
 
     df_all = pd.concat(all_wallets, ignore_index=True)
     df_f   = df_all[
         (df_all["trade_count"] >= min_trades) &
-        (df_all["win_rate"]    >= min_win_rate) &
         (df_all["type"].isin(show_types))
     ].copy()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{len(markets)}</div><div class="metric-label">Mercados encontrados</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{len(markets)}</div><div class="metric-label">Mercados crypto</div></div>', unsafe_allow_html=True)
     with col2:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{(df_f["type"]=="🤖 BOT").sum()}</div><div class="metric-label">Bots detectados</div></div>', unsafe_allow_html=True)
     with col3:
@@ -430,38 +453,79 @@ else:
         st.markdown(f'<div class="metric-card"><div class="metric-value">${vol:,.0f}</div><div class="metric-label">Volumen total</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    tab1, tab2, tab3 = st.tabs(["🔍 Wallets Ranking", "📈 PnL & Volumen", "🗂️ Mercados"])
+
+    st.markdown('<div class="explain-box">'
+        '📌 <b>Lógica de detección en trades por mercado:</b><br>'
+        '🤖 BOT = ≥10 trades + tamaños consistentes (CV &lt; 0.6) + alta frecuencia o ≥25 trades<br>'
+        '&nbsp;&nbsp;&nbsp;&nbsp;<i>Los bots usan tamaños fijos y operan frecuentemente</i><br>'
+        '🐳 WHALE = volumen total ≥ $5,000 | 👤 HUMAN = resto'
+        '</div>', unsafe_allow_html=True)
+
+    tab1, tab2, tab3 = st.tabs(["🔍 Wallets Ranking", "📈 Análisis", "🗂️ Mercados escaneados"])
 
     with tab1:
+        st.markdown('<div class="section-title">Wallets detectadas en mercados BTC/Crypto</div>', unsafe_allow_html=True)
         if df_f.empty:
-            st.info("Sin datos con los filtros actuales.")
+            st.info("Sin wallets con los filtros actuales. Baja el mínimo de trades en el sidebar.")
         else:
-            d = df_f[["wallet","type","trade_count","win_rate","total_volume","avg_size","pnl_est","market"]].copy()
-            d.columns = ["Wallet","Tipo","# Trades","Win Rate","Volumen $","Avg Size","PnL Est. $","Mercado"]
-            d["Win Rate"]    = (d["Win Rate"]*100).round(1).astype(str) + "%"
-            d["Wallet"]      = d["Wallet"].astype(str).str[:14] + "…"
-            d["Volumen $"]   = d["Volumen $"].round(2)
-            d["PnL Est. $"]  = d["PnL Est. $"].round(2)
-            st.dataframe(d, use_container_width=True, hide_index=True)
-            st.download_button("⬇️ CSV", d.to_csv(index=False).encode(), "wallets.csv", "text/csv")
+            disp = df_f[[
+                "wallet","type","trade_count","total_volume",
+                "avg_size","size_cv","trades_per_hour","smart_rate","market"
+            ]].copy()
+            disp.columns = [
+                "Wallet","Tipo","# Trades","Volumen $",
+                "Avg Size","CV Tamaño","Trades/Hora","Smart Rate","Mercado"
+            ]
+            disp["Wallet"]      = disp["Wallet"].astype(str).str[:14] + "…"
+            disp["Smart Rate"]  = (disp["Smart Rate"]*100).round(1).astype(str) + "%"
+            disp["Volumen $"]   = disp["Volumen $"].round(2)
+
+            st.dataframe(disp, use_container_width=True, hide_index=True,
+                column_config={
+                    "Volumen $":    st.column_config.NumberColumn(format="$%.2f"),
+                    "Trades/Hora":  st.column_config.NumberColumn(format="%.2f"),
+                    "CV Tamaño":    st.column_config.NumberColumn(
+                        help="Coeficiente de variación del tamaño. <0.3 = muy consistente (señal de bot)"),
+                })
+            st.download_button("⬇️ CSV", disp.to_csv(index=False).encode(), "wallets_trades.csv", "text/csv")
 
     with tab2:
         if not df_f.empty:
             c1, c2 = st.columns(2)
             with c1:
-                fig = px.box(df_f, x="type", y="win_rate", color="type",
+                st.markdown('<div class="section-title">Trades vs Volumen por tipo</div>', unsafe_allow_html=True)
+                fig = px.scatter(df_f, x="trade_count", y="total_volume", color="type",
+                    size="trades_per_hour",
                     color_discrete_map={"🤖 BOT":"#00ff9d","🐳 WHALE":"#00b4ff","👤 HUMAN":"#6b7280"},
-                    template="plotly_dark")
+                    template="plotly_dark", hover_data=["wallet","size_cv","smart_rate"],
+                    labels={"trade_count":"# Trades","total_volume":"Volumen $"})
                 fig.update_layout(paper_bgcolor="#111827", plot_bgcolor="#111827",
-                    showlegend=False, font_family="Space Mono", margin=dict(t=10,b=10))
+                    margin=dict(t=10,b=10), font_family="Space Mono")
                 st.plotly_chart(fig, use_container_width=True)
+
             with c2:
-                fig2 = px.scatter(df_f, x="total_volume", y="win_rate", color="type",
+                st.markdown('<div class="section-title">Consistencia de tamaño (CV) por tipo</div>', unsafe_allow_html=True)
+                fig2 = px.box(df_f, x="type", y="size_cv", color="type",
                     color_discrete_map={"🤖 BOT":"#00ff9d","🐳 WHALE":"#00b4ff","👤 HUMAN":"#6b7280"},
-                    template="plotly_dark", hover_data=["wallet","trade_count"])
+                    template="plotly_dark",
+                    labels={"size_cv":"CV Tamaño (menor = más consistente)","type":"Tipo"})
                 fig2.update_layout(paper_bgcolor="#111827", plot_bgcolor="#111827",
-                    font_family="Space Mono", margin=dict(t=10,b=10))
+                    showlegend=False, margin=dict(t=10,b=10), font_family="Space Mono")
                 st.plotly_chart(fig2, use_container_width=True)
+
+            st.markdown('<div class="section-title">Top 20 wallets por volumen</div>', unsafe_allow_html=True)
+            top20  = df_f.nlargest(20, "total_volume").copy()
+            top20["label"] = top20["wallet"].str[:10] + "… " + top20["type"]
+            colors = ["#00ff9d" if t == "🤖 BOT" else "#00b4ff" if t == "🐳 WHALE" else "#6b7280"
+                      for t in top20["type"]]
+            fig3 = go.Figure(go.Bar(x=top20["label"], y=top20["total_volume"],
+                marker_color=colors,
+                text=["$"+f"{v:,.0f}" for v in top20["total_volume"]],
+                textposition="outside"))
+            fig3.update_layout(paper_bgcolor="#111827", plot_bgcolor="#111827",
+                font_family="Space Mono", font_color="#9ca3af",
+                margin=dict(t=10,b=10), xaxis_tickangle=-40, yaxis_title="Volumen ($)")
+            st.plotly_chart(fig3, use_container_width=True)
 
     with tab3:
         st.dataframe(pd.DataFrame(market_log), use_container_width=True, hide_index=True)
